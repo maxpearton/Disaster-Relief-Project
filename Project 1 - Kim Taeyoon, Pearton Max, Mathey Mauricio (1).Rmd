@@ -1,0 +1,793 @@
+---
+title: "Disaster relief project - Part 1"
+author:
+  - Taeyoon Kim
+  - Mauricio Mathey
+  - Max Pearton
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+```{r hide-code, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE)
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+
+library(tidymodels)
+library(tidyverse)
+library(patchwork)
+library(discrim)
+library(kableExtra)
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+
+library(doParallel)
+cl <- makePSOCKcluster(parallel::detectCores(logical = FALSE))
+registerDoParallel(cl)
+
+```
+
+
+
+# Introduction
+
+In response to the devastating earthquake that struck Haiti in 2010, rescue efforts
+faced significant challenges in locating displaced persons residing in makeshift
+shelters amidst the widespread destruction. With communication networks and
+infrastructure severely disrupted, aid workers struggled to pinpoint the locations
+of those in need amidst the vast expanse of affected areas. The presence of blue
+tarps, used by displaced individuals to construct temporary shelters, served as
+a vital indicator for locating those in need. The problem now wasn’t so much where
+to look as it is how fast these unique locations could be pinpointed amidst a wide
+array of geographical features and other man-made structures that are present in
+high resolution geo-referenced imagery taken from an aircraft. The sheer quantity
+of aerial footage collected on a daily basis deemed it an impossible task for
+the human eye. Aid workers would be unable to search through the thousands of
+images in time to correctly identify the tarps and subsequently coordinate rescue
+operations. To address this critical issue, data mining techniques emerged as a
+promising solution. Automated algorithms that are capable of efficiently and
+accurately identifying these shelters would be deployed on the collected data,
+enabling rescue workers to deliver essential aid in a timely manner. This project
+aims to evaluate various classification algorithms to determine the most effective
+approach for identifying displaced persons within the imagery data, with the
+ultimate goal of facilitating timely assistance to those affected by the calamity.
+
+Our endeavor began with extensive exploratory data analyses to gain a better
+understanding of the underlying characteristics of the data collected by the
+team from the Rochester Institute of Technology. The discoveries made in this
+process informed our methodology in terms of how we manipulated the data, which
+performance metric best served our interests, and how we justify recommending a
+particular model given the task at hand.
+
+# Data
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+data <- read.csv("~/MSDS/Statistical learning/Project/Part 1/HaitiPixels.csv")
+```
+
+We are working with data collected from aerial images. From Table 1, we can
+see that the information that we have is class, red, green, blue. In our case,
+as what we are trying to predict is if it's vegetation or a makeshift, Class
+will be our dependent variable. Red, Green, and Blue are our independent
+variables.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+kable(head(data), caption = 'Sample of the data')
+```
+
+From Table 2 we can see that there are 5 categories in the dataset. We are
+interested in predicting the "Blue Tarp" category. A first issue that we can
+observe is that it is an unbalanced set. Blue tarps represent 3% of the data only.
+This means that it would be very easy for any method to ignore this class and it
+could achieve a 97% accuracy. This suggests three initial strategies. The first
+one is that when splitting the data we will need to take a stratified sample.
+This will ensure that the distribution of both training and testing sets
+resemble the original one. The second strategy is reducing the number of classes
+from 5 to only 2. This will help us focus on identifying blue tarps and not
+other types of objects. Finally, is the metric we will optimize for. If we choose
+accuracy, it will be very easy for us to achieve an accuracy of 97%. But this
+would be at the expense of not correctly identifying any shelters. On the other
+hand if we are overly cautious and assign a greater amount of shelters, we could
+potentially dilute rescue efforts. A metric that balances the sensitivity and
+the specificity is the J-Index. This is the metric we will be using.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+table2 <- data %>% group_by(Class) %>% summarize(count = n()) %>%
+  mutate(percentage = round(count/sum(count)*100,0))
+
+kable(table2, caption = "Number of observations per class")
+```
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+data$Class2 <- ifelse(data$Class == 'Blue Tarp','Shelter','Other')
+```
+
+Let's explore how does the presence of red, blue, or green determine each class.
+As previously mentioned, we will reclassify the data. Blue Tarp will be coded as
+Shelter and all the other categories as Other. This will allow us to focus on
+identifying only the shelters which is the problem we are trying to solve.
+
+From figure 1 we can see that for red the shelters present most of the values
+between ~120 and 225 which allow to differentiate them from other objects. For blue
+we can see that shelters don't present low values of blue but they do present
+values aboce 200 which could help differentiate. Finally for greens we observe
+a similar behavior where shelter vs other exhibit differentiated behaviors.
+
+```{r}
+#| fig.cap: Distribution of color by class
+#| fig.pos: H
+#| fig.width: 5
+#| fig.height: 5
+#| fig.align: center
+#| out.width: 75%
+
+reds <- ggplot(data, aes(x = Red, color = Class2)) + geom_density() + theme_minimal()
+blues <- ggplot(data, aes(color = Class2, x = Blue)) + geom_density() + theme_minimal()
+greens <- ggplot(data, aes(color = Class2, x = Green)) + geom_density() + theme_minimal()
+
+reds / blues / greens
+```
+
+Let's explore if there are any interactions between colors that could help us
+identify shelters better.
+
+From figure 2 we can see that there seems to be an approximately linear
+separations between blue and red for shelter vs non shelter. This suggests that
+methods with linear boundaries might perform well.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Blue vs Red separation
+#| fig.pos: H
+#| fig.width: 5
+#| fig.height: 3
+#| fig.align: center
+#| out.width: 75%
+ggplot(data, aes(x = Red, y = Blue, color = Class2)) + geom_point() + theme_minimal()
+```
+
+From figure 3 we can see that while there is a separation between green and
+red, it seems to be nonlinear. This because there is an overlaping area where
+you would need a U shape function to be able to separe them. And even with that
+we might not be able to do so.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Green vs Red separation
+#| fig.pos: H
+#| fig.width: 5
+#| fig.height: 3
+#| fig.align: center
+#| out.width: 75%
+
+ggplot(data, aes(x = Red, y = Green, color = Class2)) + geom_point() + theme_minimal()
+```
+
+From figure 4 we can see that there seems to be a separation between green and
+blue. While not exactly linear, it seems it could be approximated as one.
+
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Green vs Blue separation
+#| fig.pos: H
+#| fig.width: 5
+#| fig.height: 3
+#| fig.align: center
+#| out.width: 75%
+
+ggplot(data, aes(x = Blue, y = Green, color = Class2)) + geom_point() + theme_minimal()
+```
+
+# Description of methodology
+
+We will test 5 different models: logistic regression, linear discriminant
+analysis, quadratic discriminant analysis, K-nearest neighbor, and penalized
+logistic regression. We will use 10 fold cross-validation to assess the
+performance of each of the models and decide which one to use. A seed with a
+value of 1 will be used across the models to ensure reproducibility. We will
+have a training set and a testing set. We will get a stratified sample by the
+class variable. The split will have an 80% - 20% split for training and
+testing.
+
+
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+set.seed(1)
+
+# Set class as factor
+data$Class2 <- as.factor(data$Class2)
+
+# 2 Split and cross-validation
+class_split <- initial_split(data, prop=0.80, strata=Class2)
+train <- training(class_split)
+test <- testing(class_split)
+
+resamples <- vfold_cv(train, v=10, strata=Class2)
+cv_control <- control_resamples(save_pred=TRUE)
+```
+
+## Logistic regression
+
+The first model we are going to test is a logistic regression. From table 3
+we can see that the performance of is quite good. We can achieve a sensitivity
+of 99%, meaning that we are correctly identifying 99% of the shelters.
+Additionally, we have a j-index of 0.89, indicating that we are correctly
+discriminating non shelters from shelters.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+# Formula
+formula <- Class2 ~ Red + Blue + Green
+
+# Recipe
+rec <- recipe(formula, data=train) %>% 
+  step_normalize(all_numeric_predictors())
+
+# Logistic regression specification
+logreg_spec <- logistic_reg(engine="glm", mode="classification")
+
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+# Logistic regression workflow
+logreg_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(logreg_spec)
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+# Define metrics
+metrics =  metric_set(roc_auc, j_index, sensitivity)
+
+# Cross-validation
+logreg_cv <- fit_resamples(logreg_wf, resamples,
+                                metrics=metrics, control=cv_control)
+
+```
+
+```{r}
+kable(collect_metrics(logreg_cv), caption = "Performance of logistic regression")
+```
+
+The next step is figuring out the optimal threshold. As previously mentioned,
+we want to maximize j-index to prevent false positives.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+# Create function to scan thresholds
+threshold_graph <- function(model_cv, model_name) {
+  performance <- probably::threshold_perf(collect_predictions(model_cv),
+                                          Class2, .pred_Shelter,
+                                          thresholds=seq(0.05, 0.95, 0.01),
+                                          event_level="second",
+                                          metrics=metric_set(j_index))
+  
+  max_metrics <- performance %>%
+    group_by(.metric) %>%
+    filter(.estimate == max(.estimate))
+  
+  optimal_threshold <- max_metrics$.threshold[1]
+  
+  ggplot(performance, aes(x=.threshold, y=.estimate)) +
+    geom_line() +
+    geom_point(data=max_metrics, color="black") +
+    labs(x="Threshold", y="J-Index") +
+    geom_text(x = optimal_threshold, y = max_metrics$.estimate[1], 
+              label = paste("Optimal Threshold: ", round(optimal_threshold, 2),
+                            "|","J-Index: ", round(max_metrics$.estimate[1], 2)),
+              vjust = 0.5, hjust = -0.3, color = "black", size = 4) +
+    coord_cartesian(ylim=c(0, 1))
+}
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Optimal threshold for logistic regression
+#| fig.pos: H
+#| fig.width: 5
+#| fig.height: 3
+#| fig.align: center
+#| out.width: 75%
+
+threshold_graph(logreg_cv, "Logistic regression") + theme_minimal()
+```
+
+From figure 5 we can see that by reducing the threshold, the J-Index increases to 0.96.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+logreg_model <- fit(logreg_wf, data = train)
+```
+
+## Linear discriminant analysis
+
+Next we are going to move to a linear discriminant analysis (LDA) model.
+
+Before tuning the model we can see in table 4 a good performance. Just as with the logistic
+regression. Nonetheless, the logistic regression performs slightly better. We
+confirm this when we do the threshold scanning in figure 6 and identify that the highest
+J-Index that LDA can achieve is 0.84 compared to 0.97. This suggest that
+logistic regression is performing better.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+# Define LDA specifications
+lda_spec <- discrim_linear(mode="classification") %>%
+set_engine('MASS')
+
+# LDA model specification
+lda_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(lda_spec)
+
+# Cross validation
+lda_cv <- fit_resamples(lda_wf, resamples, metrics=metrics, control=cv_control)
+```
+
+```{r}
+kable(collect_metrics(lda_cv), caption = "Performance of LDA")
+```
+
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Optimal threshold for LDA
+#| fig.pos: H
+#| fig.width: 5
+#| fig.height: 3
+#| fig.align: center
+#| out.width: 75%
+
+threshold_graph(lda_cv, "LDA") + theme_minimal()
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+lda_model <- fit(lda_wf, data = train)
+```
+
+
+## Quadratic discriminant analysis
+
+Next we are going to move to a quadratic discriminant analysis (QDA) model.
+
+Before tuning the model we can see a good performance (table 5). QDA performs slightly
+better than LDA but underperforms logistic regression. When tuning the threshold
+in figure 7, the difference in performance vs LDA becomes very evident but it would still
+underperform logistic regression.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+# Define LDA specifications
+qda_spec <- discrim_quad(mode="classification") %>%
+set_engine('MASS')
+
+# LDA model specification
+qda_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(qda_spec)
+
+# Cross validation
+qda_cv <- fit_resamples(qda_wf, resamples, metrics=metrics, control=cv_control)
+```
+
+```{r}
+kable(collect_metrics(qda_cv), caption = "Performance of QDA")
+```
+
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Optimal threshold for QDA
+#| fig.pos: H
+#| fig.width: 5
+#| fig.height: 3
+#| fig.align: center
+#| out.width: 75%
+
+threshold_graph(qda_cv, "QDA") + theme_minimal()
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+qda_model <- fit(qda_wf, data = train)
+```
+
+## K-nearest-neighbor
+
+Next we will explore K-nearest-neighbors. For KNN we will define the number
+of neighbors K as a tuneable parameter to understand which value would
+yield the highest J-Index.
+
+From table 6, we can see that if we aim to maximize the J-Index, the optimal number of
+neighbors is 12. Other viable alternatives could be 9, 10, 11, or 13. All have
+very similar J-Index values.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+# Define KNN specifications
+knn_spec <- nearest_neighbor(engine='kknn',
+                             mode="classification",
+                             neighbors=tune())
+
+# KNN model specification
+knn_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(knn_spec)
+
+# Define neighbors parameters
+nn_params <- extract_parameter_set_dials(knn_wf) %>%
+  update(neighbors=neighbors(c(2, 20)))
+
+
+# Cross validation
+knn_cv <- tune_grid(knn_wf,
+                    metrics=metrics,
+                    resamples=resamples,
+                    control=cv_control,
+                    grid=grid_regular(nn_params, levels=20))
+```
+
+```{r}
+kable(show_best(knn_cv, metric='j_index'),
+      caption = "Performance based on number of neighbors")
+```
+
+We can also see that with 12 neighbors we are not only maximizing the J-Index,
+but that after this value AUC ROC doesn't seem to increase. In figure 8, we can
+also observe that if we wanted to maximize sensitivity we would need 4 or 5 neighbors.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Optimal number of neighbors for KNN
+#| fig.pos: H
+#| fig.width: 5
+#| fig.height: 5
+#| fig.align: center
+#| out.width: 75%
+
+autoplot(knn_cv) + theme_minimal()
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+knn_model <- knn_wf %>%
+  finalize_workflow(select_best(knn_cv, metric="j_index")) %>%
+  fit(train)
+```
+
+## Penalized logistic regression
+
+Finally, let's explore the results from penalized logistic regression. In this
+case we have 2 tuning parameters. The first one is penalty, this determines
+the amount of penalty that we will introduce in the model. The second one is
+mixture. Which determines the proportion of Lasso vs Ridge penalization that
+we will apply. 0 means only Ridge penalization is being used while 1 that only
+Lasso. Anything in between is a mixture of both, with lower values having a
+higher proportion of Ridge and higher ones a higher proportion of Lasso.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+# Set seed to ensure reproducibility
+set.seed(1)
+
+# Define penalized logistic regression specifications
+penlog_spec <- logistic_reg(engine='glmnet',
+                             mode="classification",
+                             penalty=tune(),
+                             mixture=tune())
+
+# Penalized logistic regression model specification
+penlog_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(penlog_spec)
+
+# Define parameters
+penlog_params <- extract_parameter_set_dials(penlog_wf) %>%
+  update(penalty=penalty(c(-20, -5)),
+         mixture=mixture(c(0, 1)))
+
+
+# Cross validation
+penlog_cv <- tune_grid(penlog_wf,
+                    metrics=metrics,
+                    resamples=resamples,
+                    control=cv_control,
+                    grid=grid_random(penlog_params, levels=500))
+```
+
+```{r}
+kable(show_best(penlog_cv, metric='j_index'),
+      caption = "Penalty and mixture tuning")
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Model performance based on regulazation and proportion of Lasso penalty
+#| fig.pos: H
+#| fig.width: 6
+#| fig.height: 5
+#| fig.align: center
+#| out.width: 75%
+
+autoplot(penlog_cv) + theme_minimal()
+```
+
+From both table 7 and the figure 9 we can see that the amount of penalty applied
+is very small and that it is almost exclusively Lasso. It seems as if the
+penalized logistic regression is performing worse than the other models.
+Nonetheless, we see that there are high values for ROC AUC, which suggests that
+0.5 might not be the optimal threshold.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+
+penlog_model <- penlog_wf %>%
+  finalize_workflow(select_best(penlog_cv, metric="j_index")) %>%
+  fit(train)
+```
+
+In figure 10, we can see that just as with logistic regression, the optimal threshold is
+0.05. which would yield a J-Index of 0.97.
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Optimal threshold for penalized logistic regression
+#| fig.pos: H
+#| fig.width: 6
+#| fig.height: 5
+#| fig.align: center
+#| out.width: 75%
+
+threshold_graph(penlog_cv, 'Penalized') + theme_minimal()
+```
+
+# Results
+
+In figure 11 we can observe the ROC curve for logistic regression, penalized
+logistic regression, LDA, and QDA. It is worth mentioning that KNN does not
+have a traditional ROC as the other models. As we can see, the only models that
+has a slightly worse ROC is LDA. The other three models are very similar.
+To compare the performance of all the models we will look at accuracy, 
+J-Index, sensitivity, and specificity.
+
+```{r}
+get_ROC_plot <- function(model, data, model_name) {
+  model %>%
+    augment(data) %>%
+    roc_curve(truth=Class2, .pred_Shelter, event_level="second") %>%
+    autoplot() + theme_minimal() +
+    labs(title=model_name)
+}
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: ROC for each model using testing data
+#| fig.pos: H
+#| fig.width: 6
+#| fig.height: 5
+#| fig.align: center
+#| out.width: 75%
+
+logreg_roc <- get_ROC_plot(logreg_model, test, "Logistic regression")
+lda_roc <- get_ROC_plot(lda_model, test, "LDA")
+qda_roc <- get_ROC_plot(qda_model, test, "QDA")
+penlog_roc <- get_ROC_plot(penlog_model, test, "Penalized logistic regression")
+
+(logreg_roc + penlog_roc) / (lda_roc + qda_roc)
+```
+
+From figure 12 we can see the performance metrics on testing data for each model.
+As seen with the training data, all models have strong performance with KNN having
+slightly better performance. We can observe that LDA's lower performance comes
+from having a lower specificity. This means that LDA is more likely to identify
+a shelter as a non-shelter, which would result is people not receiving help.
+
+In our case, we are mostly interested in the J-Index and we can see that KNN
+is slightly better than the others. As previously explained, J-Index is the
+preferred metric because it allows us to balance both sensitivity and specificity
+so rescue efforts are not diluted. From a practical standpoint nonetheless,
+logistic regression is a close second and it has the advantage that
+it is easier to interpret. Therefore our suggestion is to choose the logistic
+regression model.
+
+```{r}
+calculate_metrics_probs <- function(model_name, model, data, threshold){
+  results <- augment(model, data)
+  results$prediction <- as.factor(ifelse(results$.pred_Shelter>threshold,'Shelter','Other'))
+  metrics <- bind_rows(
+   bind_cols(Model = model_name,j_index(results, Class2, prediction)),
+   bind_cols(Model = model_name,accuracy(results, Class2, prediction)),
+   bind_cols(Model = model_name,sensitivity(results, Class2, prediction)),
+   bind_cols(Model = model_name,specificity(results, Class2, prediction)),
+  )
+  return(metrics)
+}
+
+calculate_metrics_knn <- function(model_name, model, data){
+  results <- augment(model, data)
+    metrics <- bind_rows(
+      bind_cols(Model = model_name,j_index(results, Class2, .pred_class)),
+      bind_cols(Model = model_name,accuracy(results, Class2, .pred_class)),
+      bind_cols(Model = model_name,sensitivity(results, Class2, .pred_class)),
+      bind_cols(Model = model_name,specificity(results, Class2, .pred_class)),
+  )
+  return(metrics)
+}
+```
+
+```{r}
+logreg_metrics <- calculate_metrics_probs('Logistic regression', logreg_model, test, 0.1)
+lda_metrics <- calculate_metrics_probs('LDA', lda_model, test, 0.05)
+qda_metrics <- calculate_metrics_probs('QDA', qda_model, test, 0.05)
+penlog_metrics <- calculate_metrics_probs('Penalized', penlog_model, test, 0.05)
+knn_metrics <- calculate_metrics_knn('KNN', knn_model, test)
+
+total_metrics <- bind_rows(logreg_metrics, lda_metrics, qda_metrics,
+                           penlog_metrics, knn_metrics)
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+#| cache: TRUE
+#| fig.cap: Performance metrics for each model using testing data
+#| fig.pos: H
+#| fig.width: 6
+#| fig.height: 5
+#| fig.align: center
+#| out.width: 75%
+
+ggplot(total_metrics, aes(x = Model, y = .estimate)) + geom_col() +
+  facet_wrap(~ .metric) + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(aes(label = round(.estimate,2)), vjust = 1.1,
+            position = position_dodge(width = 0.9), color = "white")
+```
+
+# Conclusions
+
+1. Determination of the Best Algorithm
+
+After comprehensive evaluation of multiple classification algorithms, including
+Logistic Regression, Linear Discriminant Analysis (LDA), Quadratic Discriminant
+Analysis (QDA), K-Nearest Neighbors (KNN), and Penalized Logistic Regression, it
+was found that all the models exhibited strong performance across various metrics.
+KNN emerged as the top performer with a J-index of 0.97 closely followed by Logistic
+Regression with a J-index of 0.96. Despite KNN’s slightly superior performance,
+Logistic Regression offers the advantage of interpretability, making it a viable
+alternative. Considering the balance between performance and interpretability,
+our recommendation is to prioritize the logistic regression model for its strong
+performance and ease of interpretation. 
+
+2. Confidence in the Results and Practical Implications
+
+Despite the nuanced differences in performance among the evaluated models, the
+overall findings instill confidence in the efficacy of predictive modeling techniques
+for locating displaced persons in disaster relief scenarios. By leveraging the
+insights gained from this project and implementing the recommended strategies,
+humanitarian organizations can enhance their ability to identify shelters with
+displaced persons accurately, thereby facilitating timely and targeted assistance
+to those in need. While uncertainties and limitations persist, the results
+underscore the potential of predictive modeling to significantly impact and
+improve disaster response efforts, potentially saving lives and mitigating the
+impact of humanitarian crises.  
+
+3. What additional recommended actions can be taken to improve results?
+
+As is the case with many predictive modeling tasks on datasets, particularly in
+the realm of geo-referenced imagery, the first and most evident action is to
+establish a wider pipeline for collecting aerial footage. This action isn’t
+necessarily taking issue with the volume of data available. Rather, this is more
+of an effort to address the stark imbalance evident in the dataset with only 3%
+of the data pertaining to blue tarp identifiers. The reasoning is that with a
+larger quantity of data available to train predictive models, the better ability
+of said model to generalize on unseen data. The second action is to verify that
+the use of tarps specifically blue in color is the preferred identifier for those
+in need of rescue. Although the scope of this project defines it as so, it is
+difficult to presume that the abundance of blue tarp material should dictate
+rescue efforts throughout the country. Perhaps exploring an alternate identifier
+for survivors would be a more realistic assessment of the usefulness of data-mining
+algorithms in an emergency setting.
+
+
+# Appendix {-}
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
+
+
+
+
+
+
+
+
